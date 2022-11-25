@@ -1,0 +1,266 @@
+Parameters:
+  apiRegion:
+    Type: String
+    AllowedValues: ["REGIONAL", "PRIVATE", "EDGE"]
+  ThingName:
+    Type: String
+    Description: Type your ThingName (Capital letters and special characters are not allowed)
+  LambdaCheckFunction:
+    Type: String
+    Description: Type your Lambda Function created to Check the Shadow Status
+  LambdaUpdateFunction:
+    Type: String
+    Description: Type your Lambda Function created to Update the Shadow Status
+
+  
+ 
+Resources:
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub bucket-${ThingName}
+  RolePermissionS3:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub RoleS3_Grupo${ThingName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal: 
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: TrustRelationship
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::${ThingName}'
+        - PolicyName: AmazonAPIGatewayPushToCloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                      - 'logs:CreateLogGroup'
+                      - 'logs:CreateLogStream'
+                      - 'logs:DescribeLogGroup'
+                      - 'logs:DescribeLogStream'
+                      - 'logs:PutLogEvents'
+                      - 'logs:GetLogEvents'
+                      - 'logs:FilterLogEvents'
+                Resource: '*'
+  PoliticaPermissionS3:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub S3_PolicyGrupo${ThingName}
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource: !Sub arn:aws:s3:::bucket-${ThingName}/iot_switch.html
+      Roles: 
+        - !Ref RolePermissionS3
+    DependsOn: 
+      - RolePermissionS3
+
+  IoTPolicy:
+    Type: AWS::IoT::Policy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: "*"
+          Resource: "*"
+      PolicyName: !Sub Policy_${ThingName}
+
+  APIGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      EndpointConfiguration:
+        Types:
+          - !Ref apiRegion
+      BinaryMediaTypes:
+          - 'text/html'
+      Name: !Sub API_${ThingName}
+
+  APIGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      ParentId: !GetAtt
+        - APIGatewayRestApi
+        - RootResourceId
+      PathPart: 'shadow-state'
+
+  apiGatewayGETMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      MethodResponses:
+        - StatusCode: 200
+      Integration:
+        Credentials: !Sub arn:aws:iam::${AWS::AccountId}:role/${RolePermissionS3}
+        IntegrationHttpMethod: GET
+        
+        IntegrationResponses:
+          - StatusCode: 200
+        PassthroughBehavior: WHEN_NO_MATCH      
+        Type: AWS
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:s3:path/bucket-${ThingName}/iot_switch.html
+      ResourceId: !GetAtt APIGatewayRestApi.RootResourceId
+      RestApiId: !Ref APIGatewayRestApi
+
+  Deployment:
+    DependsOn: 
+      - apiGatewayGETMethod
+      - APIGatewayResource
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      Description: My deployment
+      StageName: Dev
+
+
+
+
+  OptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      RestApiId:
+        Ref: APIGatewayRestApi
+      ResourceId:
+        Ref: APIGatewayResource
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+          ResponseTemplates:
+            application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK
+      MethodResponses:
+      - StatusCode: 200
+        ResponseModels:
+          application/json: 'Empty'
+        ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: "'*'"
+            method.response.header.Access-Control-Allow-Methods: "'*'"
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+
+  APIGatewayMethodPOST:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      ResourceId:  !Ref APIGatewayResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+      Integration:
+        Type: AWS_PROXY
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaUpdateArn}/invocations
+          - LambdaUpdateArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaUpdateFunction}
+
+  APIGatewayMethodGET:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      ResourceId:  !Ref APIGatewayResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+      Integration:
+        Type: AWS_PROXY
+        IntegrationResponses:
+          - StatusCode: 200
+        IntegrationHttpMethod: GET       
+        Uri: !Sub
+          - >-
+            arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaCheckArn}/invocations
+          - LambdaCheckArn: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaCheckFunction}
+
+ 
+
+  APIGatewayPermissionGET:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaCheckFunction}
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Sub ${AWS::AccountId}
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestApi}/*/GET/shadow-state
+
+
+
+  APIGatewayPermissionPOST:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaUpdateFunction}
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Sub ${AWS::AccountId}
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestApi}/*/POST/shadow-state
+
+
+
+  DeploymentGET:
+    DependsOn: 
+      - APIGatewayMethodGET
+      - APIGatewayResource
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      Description: My deployment
+      StageName: Dev
+
+  DeploymentPOST:
+    DependsOn: 
+      - APIGatewayMethodPOST
+      - APIGatewayResource
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      Description: My deployment
+      StageName: Dev
+
+  DeploymentCORS:
+    DependsOn: 
+      - OptionsMethod
+      - APIGatewayResource
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref APIGatewayRestApi
+      Description: My deployment
+      StageName: Dev
+
+  MyThing:
+    Type: AWS::IoT::Thing
+    Properties:
+      ThingName: !Ref ThingName
